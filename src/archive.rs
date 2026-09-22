@@ -178,11 +178,15 @@ impl Store for FileArchive {
         ))
     }
     fn checkpoint(&mut self) -> Result<Snapshot> {
-        let identity = self
-            .selected
-            .clone()
-            .or_else(|| self.catalog().ok()?.checkpoints.last().cloned())
-            .ok_or_else(|| Error::Missing("no published checkpoint".into()))?;
+        let identity = match &self.selected {
+            Some(identity) => identity.clone(),
+            None => self
+                .catalog()?
+                .checkpoints
+                .last()
+                .cloned()
+                .ok_or_else(|| Error::Missing("no published checkpoint".into()))?,
+        };
         self.snapshot(&identity)
     }
 }

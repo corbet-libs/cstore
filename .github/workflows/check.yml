@@ -1,0 +1,71 @@
+name: cstore checks
+
+on:
+  workflow_dispatch:
+    inputs:
+      checks:
+        description: Shared check selectors
+        type: choice
+        options: ["rust,core", "resolve,rust,core", "core"]
+        default: "rust,core"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cstore-check-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    if: github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CARGO_BUILD_JOBS: "2"
+      RUST_TEST_THREADS: "2"
+      CI_JOBS: "2"
+      CI_TEST_THREADS: "2"
+      CI_MEMORY_MB: "4096"
+      CI_MEMORY_PER_JOB_MB: "1024"
+      CI_MIN_AVAILABLE_MB: "4096"
+      CI_TIMEOUT: "600"
+      CI_REPOSITORY_URL: https://github.com/corbet-libs/cstore
+      CI_COMMIT_SHA: ${{ github.sha }}
+      CHECKS: ${{ inputs.checks }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Check out the shared check runner
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: corbet-libs/ccid
+          ref: 85e316579ea938c42a4e45d42cb3ac94aa2d9328
+          path: .ci/tool
+          persist-credentials: false
+      - name: Select stable Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          workspaces: |
+            . -> target
+            .ci/tool -> target
+          cache-on-failure: true
+      - name: Build the pinned shared runner
+        run: |
+          rustup run stable cargo build --locked --release --manifest-path .ci/tool/Cargo.toml
+          test "$(.ci/tool/target/release/ccid source-revision)" = 85e316579ea938c42a4e45d42cb3ac94aa2d9328
+      - name: Run repository contracts
+        run: |
+          export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+          export PATH="$(rustup run stable rustc --print sysroot)/bin:$PATH"
+          .ci/tool/target/release/ccid check --repo "$GITHUB_WORKSPACE" --check "$CHECKS"
+      - name: Retain dependency snapshot
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+        with:
+          name: cstore-dependency-snapshot
+          path: Cargo.lock
+          if-no-files-found: error
+          retention-days: 3

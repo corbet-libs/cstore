@@ -214,6 +214,15 @@ impl Snapshot {
             if !directories.insert(directory) || self.records.contains_key(directory) {
                 return Err(Error::Invalid("conflicting directory entry".into()));
             }
+            let mut ancestor = directory.as_str();
+            while let Some((parent, _)) = ancestor.rsplit_once('/') {
+                if self.records.contains_key(&Key::new(parent)?) {
+                    return Err(Error::Invalid(
+                        "record is an ancestor of a directory".into(),
+                    ));
+                }
+                ancestor = parent;
+            }
         }
         for (key, record) in &self.records {
             if key != &record.key {

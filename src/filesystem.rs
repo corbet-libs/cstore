@@ -38,6 +38,8 @@ struct Pending {
 pub struct FileStore {
     root: PathBuf,
     control: PathBuf,
+    #[cfg(test)]
+    fail_after: Option<&'static str>,
 }
 
 impl FileStore {
@@ -56,7 +58,12 @@ impl FileStore {
                 "control and payload trees must be disjoint".into(),
             ));
         }
-        let store = Self { root, control };
+        let store = Self {
+            root,
+            control,
+            #[cfg(test)]
+            fail_after: None,
+        };
         let _lock = lock(&store.control)?;
         fs::create_dir_all(store.control.join("blobs"))?;
         let path = store.control.join("state.json");
@@ -84,6 +91,15 @@ impl FileStore {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    fn fault(&self, stage: &str) -> Result<()> {
+        #[cfg(test)]
+        if self.fail_after == Some(stage) {
+            return Err(Error::Io(std::io::Error::other("injected interruption")));
+        }
+        let _ = stage;
+        Ok(())
     }
 
     pub fn set_origin(&mut self, origin: Origin) -> Result<()> {
@@ -218,6 +234,7 @@ impl FileStore {
             .receipts
             .insert(pending.receipt.request_id.clone(), pending.receipt.clone());
         self.save(state)?;
+        self.fault("state")?;
         fs::remove_file(self.control.join("pending.json"))?;
         sync_dir(&self.control)
     }
@@ -393,7 +410,9 @@ impl Store for FileStore {
             receipt: receipt.clone(),
         };
         atomic_json(&self.control.join("pending.json"), &pending)?;
+        self.fault("journal")?;
         self.apply_payload(&pending)?;
+        self.fault("payload")?;
         self.finish(&mut state, &pending)?;
         Ok(receipt)
     }
@@ -453,11 +472,15 @@ pub(crate) fn file_mode(metadata: &Metadata) -> Result<u32> {
 
 pub(crate) fn checked_path(root: &Path, key: &Key) -> Result<PathBuf> {
     let mut path = root.to_path_buf();
-    for part in key.as_str().split('/') {
+    let parts = key.as_str().split('/').collect::<Vec<_>>();
+    for (index, part) in parts.iter().enumerate() {
         path.push(part);
         match fs::symlink_metadata(&path) {
             Ok(meta) if meta.file_type().is_symlink() => {
                 return Err(Error::Unsupported(format!("symlink path {}", key.as_str())));
+            }
+            Ok(meta) if index + 1 < parts.len() && !meta.is_dir() => {
+                return Err(Error::Invalid("non-directory path ancestor".into()));
             }
             Ok(_) => (),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
@@ -528,4 +551,73 @@ pub(crate) fn read_blob(control: &Path, hash: &ContentHash) -> Result<Vec<u8>> {
     let bytes = fs::read(control.join("blobs").join(hash.as_str()))?;
     hash.verify(&bytes)?;
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Write;
+
+    #[test]
+    fn interrupted_commit_recovers_at_every_durable_boundary() {
+        for stage in ["journal", "payload", "state"] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("workspace");
+            fs::create_dir(&root).unwrap();
+            fs::write(root.join("record"), b"before").unwrap();
+            let control = temp.path().join("control");
+            let mut store = FileStore::open(&root, &control, "source").unwrap();
+            let key = Key::new("record").unwrap();
+            let revision = store.read(&key).unwrap().unwrap().revision;
+            let commit = Commit {
+                request_id: "interrupted".into(),
+                writes: vec![Write {
+                    key: key.clone(),
+                    expected: Expected::Revision { revision },
+                    value: Some((b"after".to_vec(), Metadata::default())),
+                }],
+            };
+            store.fail_after = Some(stage);
+            assert!(store.commit(&commit).is_err(), "{stage}");
+            drop(store);
+            let mut recovered = FileStore::open(&root, &control, "source").unwrap();
+            let receipt = recovered.resolve("interrupted").unwrap().unwrap();
+            assert_eq!(recovered.commit(&commit).unwrap(), receipt);
+            assert_eq!(fs::read(root.join("record")).unwrap(), b"after");
+            assert_eq!(recovered.checkpoint().unwrap().history.len(), 1);
+        }
+    }
+
+    #[test]
+    fn recovery_does_not_overwrite_an_external_edit_after_interruption() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("record"), b"before").unwrap();
+        let control = temp.path().join("control");
+        let mut store = FileStore::open(&root, &control, "source").unwrap();
+        let key = Key::new("record").unwrap();
+        let revision = store.read(&key).unwrap().unwrap().revision;
+        store.fail_after = Some("journal");
+        assert!(
+            store
+                .commit(&Commit {
+                    request_id: "pending".into(),
+                    writes: vec![Write {
+                        key,
+                        expected: Expected::Revision { revision },
+                        value: Some((b"proposed".to_vec(), Metadata::default())),
+                    }]
+                })
+                .is_err()
+        );
+        fs::write(root.join("record"), b"external edit").unwrap();
+        drop(store);
+        assert!(matches!(
+            FileStore::open(&root, &control, "source"),
+            Err(Error::ExternalChange(_))
+        ));
+        assert_eq!(fs::read(root.join("record")).unwrap(), b"external edit");
+        assert!(control.join("pending.json").is_file());
+    }
 }
