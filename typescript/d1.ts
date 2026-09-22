@@ -1,6 +1,6 @@
 // Extracted from CareerVector lib/server/src/workspace-subdoc.ts. See NOTICE.
-import { retryTransientD1 } from './retry.ts';
-import type { SnapshotRow } from './yjs.ts';
+import { retryTransientD1 } from './retry.js';
+import type { SnapshotRow } from './yjs.js';
 
 /** Structural interfaces accepted by the existing Worker D1 binding. */
 export interface PreparedStatement {
