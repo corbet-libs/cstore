@@ -54,6 +54,7 @@ jobs:
           cache-on-failure: true
       - name: Build the pinned shared runner
         run: |
+          export CCID_SOURCE_REVISION="$(git -C .ci/tool rev-parse HEAD)"
           rustup run stable cargo build --locked --release --manifest-path .ci/tool/Cargo.toml
           test "$(.ci/tool/target/release/ccid source-revision)" = 33600b394910c643c5a6af6dff479fb16418428a
       - name: Run repository contracts
