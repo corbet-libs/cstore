@@ -6,7 +6,7 @@ on:
       checks:
         description: Shared check selectors
         type: choice
-        options: ["rust,core", "resolve,rust,core", "core"]
+        options: ["rust,core", "resolve,rust,core", "core", "typescript-resolve,typescript", "typescript"]
         default: "rust,core"
 
 permissions:
@@ -46,6 +46,11 @@ jobs:
           persist-credentials: false
       - name: Select stable Rust
         run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+      - name: Select Node for the TypeScript package
+        if: contains(inputs.checks, 'typescript')
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: "24"
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
         with:
           workspaces: |
@@ -67,6 +72,8 @@ jobs:
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
         with:
           name: cstore-dependency-snapshot
-          path: Cargo.lock
+          path: |
+            Cargo.lock
+            package-lock.json
           if-no-files-found: error
           retention-days: 3

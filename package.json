@@ -1,0 +1,26 @@
+{
+  "name": "@corbet-libs/cstore",
+  "version": "0.1.0",
+  "description": "Yjs workspace persistence extracted from CareerVector",
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "repository": "github:corbet-libs/cstore",
+  "exports": {
+    ".": "./typescript/index.ts",
+    "./yjs": "./typescript/yjs.ts",
+    "./d1": "./typescript/d1.ts",
+    "./retry": "./typescript/retry.ts"
+  },
+  "files": ["typescript", "LICENSE", "NOTICE", "docs/careervector-extraction.md"],
+  "sideEffects": false,
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --test --test-concurrency=2 typescript/tests/*.test.ts"
+  },
+  "peerDependencies": {"yjs": "^13.6.32"},
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^6.0.3",
+    "yjs": "^13.6.32"
+  }
+}

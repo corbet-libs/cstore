@@ -1,0 +1,12 @@
+cstore
+Copyright 2026 Julian Yves Richard Corbet
+
+The TypeScript Yjs and D1 persistence implementation is extracted and adapted
+from CareerVector, originally maintained in careervector/careervector-corbet-ch
+at commit 8c017bb1e3d9ca643076a7429ab595f054c8751b:
+  lib/server/src/workspace-subdoc.ts
+  lib/server/src/d1-retry.ts
+
+This cstore edition is licensed under FSL-1.1-ALv2. Earlier CareerVector product
+editions retain their original license grants. Third-party dependencies retain
+their own licenses; Yjs is provided by the consuming runtime.

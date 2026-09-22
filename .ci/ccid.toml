@@ -15,3 +15,11 @@ commands = [["cargo", "check", "--locked", "--no-default-features"]]
 [checks.resolve]
 kind = "commands"
 commands = [["bash", ".ci/resolve.sh"]]
+
+[checks.typescript-resolve]
+kind = "commands"
+commands = [["npm", "install", "--package-lock-only", "--ignore-scripts"]]
+
+[checks.typescript]
+kind = "commands"
+commands = [["npm", "ci", "--ignore-scripts"], ["npm", "run", "check"], ["npm", "test"]]

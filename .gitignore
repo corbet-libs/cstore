@@ -1,2 +1,4 @@
 /target/
 /.ci/tool/
+node_modules/
+*.tgz
