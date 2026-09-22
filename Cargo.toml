@@ -1,0 +1,29 @@
+[package]
+name = "cstore"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+description = "Versioned persistence, portable workspaces, and verified backup and restore"
+license = "FSL-1.1-ALv2"
+repository = "https://github.com/corbet-libs/cstore"
+
+[features]
+default = ["filesystem"]
+filesystem = ["dep:tempfile", "dep:rustix"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+thiserror = "2.0"
+tempfile = { version = "3.23", optional = true }
+rustix = { version = "1.1", features = ["fs"], optional = true }
+
+[dev-dependencies]
+tempfile = "3.23"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"

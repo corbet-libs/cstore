@@ -1,0 +1,13 @@
+schema = 1
+project = "cstore"
+
+[checks.rust]
+kind = "cargo"
+actions = ["fmt", "test", "clippy"]
+all_features = true
+toolchain = "system"
+
+[checks.core]
+kind = "commands"
+commands = [["cargo", "check", "--locked", "--no-default-features"]]
+
