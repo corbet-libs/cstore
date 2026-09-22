@@ -21,6 +21,8 @@ struct State {
     origin: Option<Origin>,
     history: Vec<HistoricalRecord>,
     imported_receipts: Vec<Receipt>,
+    #[serde(default)]
+    observations: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -51,13 +53,13 @@ impl FileStore {
         if !root.is_dir() {
             return Err(Error::Invalid("payload root must be a directory".into()));
         }
-        fs::create_dir_all(control.as_ref())?;
-        let control = control.as_ref().canonicalize()?;
+        let control = prospective_path(control.as_ref())?;
         if control.starts_with(&root) || root.starts_with(&control) {
             return Err(Error::Invalid(
                 "control and payload trees must be disjoint".into(),
             ));
         }
+        fs::create_dir_all(&control)?;
         let store = Self {
             root,
             control,
@@ -77,6 +79,7 @@ impl FileStore {
                 origin: None,
                 history: Vec::new(),
                 imported_receipts: Vec::new(),
+                observations: 0,
             })?;
         }
         let state = store.load()?;
@@ -114,6 +117,104 @@ impl FileStore {
             return Err(Error::Conflict("store lineage is already set".into()));
         }
         state.origin = Some(origin);
+        self.save(&state)
+    }
+
+    /// Adopt metadata/history after restoring this exact payload tree.
+    ///
+    /// This never changes authored files. A changed or incomplete destination is
+    /// rejected. Source receipts remain provenance, not destination retry keys.
+    pub fn adopt_snapshot(&mut self, source: &impl Store, snapshot: &Snapshot) -> Result<()> {
+        let checkpoint = snapshot.identity()?;
+        let origin = Origin {
+            store_id: snapshot.source.clone(),
+            checkpoint: checkpoint.clone(),
+        };
+        let _lock = lock(&self.control)?;
+        self.recover()?;
+        let mut state = self.load()?;
+        if !state.receipts.is_empty()
+            || state
+                .origin
+                .as_ref()
+                .is_some_and(|previous| previous != &origin)
+        {
+            return Err(Error::Conflict(
+                "destination already has independent work".into(),
+            ));
+        }
+        let mut files = Vec::new();
+        let mut directories = Vec::new();
+        self.scan(&self.root, &mut files, &mut directories)?;
+        let source_keys = snapshot
+            .records
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        if files
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            != source_keys
+            || directories
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                != snapshot.directories.iter().collect()
+        {
+            return Err(Error::Integrity(
+                "restored inventory differs from checkpoint".into(),
+            ));
+        }
+        let mut records = BTreeMap::new();
+        for record in snapshot.records.values() {
+            let (bytes, mode) = self
+                .disk(&record.key)?
+                .ok_or_else(|| Error::Missing(record.key.as_str().into()))?;
+            record.content.verify(&bytes)?;
+            if bytes.len() as u64 != record.size || mode != file_mode(&record.metadata)? {
+                return Err(Error::Integrity(
+                    "restored record differs from checkpoint".into(),
+                ));
+            }
+            put_blob(&self.control, &bytes)?;
+            let mut adopted = record.clone();
+            adopted.revision = Revision(
+                ContentHash::of(&serde_json::to_vec(&(
+                    &state.store_id,
+                    &checkpoint,
+                    &record.key,
+                ))?)
+                .as_str()
+                .into(),
+            );
+            adopted
+                .metadata
+                .extensions
+                .insert("cstore.unix_mode".into(), mode.into());
+            records.insert(record.key.clone(), adopted);
+        }
+        for item in &snapshot.history {
+            let bytes = source.blob(&item.record.content)?;
+            item.record.content.verify(&bytes)?;
+            if bytes.len() as u64 != item.record.size {
+                return Err(Error::Integrity("historical record size mismatch".into()));
+            }
+            put_blob(&self.control, &bytes)?;
+        }
+        state.records = records;
+        state.origin = Some(origin);
+        state.history = snapshot.history.clone();
+        state.history.extend(
+            snapshot
+                .records
+                .values()
+                .cloned()
+                .map(|record| HistoricalRecord {
+                    store_id: snapshot.source.clone(),
+                    record,
+                }),
+        );
+        state.imported_receipts = snapshot.receipts.clone();
         self.save(&state)
     }
 
@@ -171,9 +272,14 @@ impl FileStore {
                 return Ok(Some(previous.clone()));
             }
         }
+        state.observations = state
+            .observations
+            .checked_add(1)
+            .ok_or_else(|| Error::Integrity("observation counter exhausted".into()))?;
         let revision = Revision(
             ContentHash::of(&serde_json::to_vec(&(
                 &state.store_id,
+                state.observations,
                 key,
                 &content,
                 &metadata,
@@ -345,6 +451,8 @@ impl Store for FileStore {
         }
         let write = &commit.writes[0];
         let previous = self.observe(&mut state, &write.key)?;
+        // Observed external changes remain recorded even when the write is stale.
+        self.save(&state)?;
         let matches = match (&write.expected, &previous) {
             (Expected::Absent, None) => true,
             (Expected::Revision { revision }, Some(record)) => revision == &record.revision,
@@ -456,6 +564,28 @@ impl Store for FileStore {
         };
         snapshot.validate()?;
         Ok(snapshot)
+    }
+}
+
+// Resolve an absent destination without creating anything in the payload tree.
+fn prospective_path(path: &Path) -> Result<PathBuf> {
+    match path.canonicalize() {
+        Ok(path) => Ok(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let absolute = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                std::env::current_dir()?.join(path)
+            };
+            let parent = absolute
+                .parent()
+                .ok_or_else(|| Error::Invalid("missing control parent".into()))?;
+            let name = absolute
+                .file_name()
+                .ok_or_else(|| Error::Invalid("invalid control path".into()))?;
+            Ok(prospective_path(parent)?.join(name))
+        }
+        Err(error) => Err(error.into()),
     }
 }
 

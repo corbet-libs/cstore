@@ -40,6 +40,197 @@ fn change(request_id: &str, key: &str, expected: Expected, value: &[u8]) -> Comm
 }
 
 #[test]
+fn invalid_control_location_leaves_payload_untouched() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("workspace");
+    fs::create_dir(&root).unwrap();
+    assert!(matches!(
+        FileStore::open(&root, root.join("new/control"), "source"),
+        Err(Error::Invalid(_))
+    ));
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+}
+
+#[test]
+fn observed_reversions_never_reuse_an_old_revision() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("workspace");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("record"), b"A").unwrap();
+    let mut store = FileStore::open(&root, temp.path().join("control"), "source").unwrap();
+    let key = Key::new("record").unwrap();
+    let original = store.read(&key).unwrap().unwrap();
+    let stale = change(
+        "stale",
+        "record",
+        Expected::Revision {
+            revision: original.revision.clone(),
+        },
+        b"replacement",
+    );
+    fs::write(root.join("record"), b"B").unwrap();
+    assert!(matches!(store.commit(&stale), Err(Error::Conflict(_))));
+    fs::write(root.join("record"), b"A").unwrap();
+    let reverted = store.read(&key).unwrap().unwrap();
+    assert_ne!(original.revision, reverted.revision);
+    assert!(matches!(store.commit(&stale), Err(Error::Conflict(_))));
+    assert_eq!(store.checkpoint().unwrap().history.len(), 2);
+}
+
+#[test]
+fn restored_workspaces_retain_metadata_history_and_lineage_without_reusing_receipts() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("workspace");
+    fs::create_dir(&root).unwrap();
+    let mut source = FileStore::open(&root, temp.path().join("control"), "source").unwrap();
+    let mut first = change("first", "record.toml", Expected::Absent, b"first");
+    let metadata = &mut first.writes[0].value.as_mut().unwrap().1;
+    metadata.media_type = Some("application/toml".into());
+    metadata.schema = Some("example.v1".into());
+    metadata
+        .extensions
+        .insert("unknown".into(), serde_json::json!({"preserve": [1, 2]}));
+    source.commit(&first).unwrap();
+    let key = Key::new("record.toml").unwrap();
+    let previous = source.read(&key).unwrap().unwrap();
+    let mut second = change(
+        "second",
+        key.as_str(),
+        Expected::Revision {
+            revision: previous.revision,
+        },
+        b"second",
+    );
+    second.writes[0].value.as_mut().unwrap().1 = previous.metadata.clone();
+    source.commit(&second).unwrap();
+    let snapshot = source.checkpoint().unwrap();
+    let root = temp.path().join("restored");
+    restore_files(&source, &snapshot, &root).unwrap();
+    let mut restored =
+        FileStore::open(&root, temp.path().join("restored-control"), "offline").unwrap();
+    restored.adopt_snapshot(&source, &snapshot).unwrap();
+    restored.adopt_snapshot(&source, &snapshot).unwrap();
+    let adopted = restored.checkpoint().unwrap();
+    assert_eq!(
+        adopted.records[&key].metadata,
+        snapshot.records[&key].metadata
+    );
+    assert_ne!(
+        adopted.records[&key].revision,
+        snapshot.records[&key].revision
+    );
+    assert_eq!(
+        adopted.origin.unwrap().checkpoint,
+        snapshot.identity().unwrap()
+    );
+    assert_eq!(adopted.receipts, snapshot.receipts);
+    assert_eq!(
+        restored.blob(&snapshot.history[0].record.content).unwrap(),
+        b"first"
+    );
+    assert!(restored.resolve("second").unwrap().is_none());
+    fs::write(root.join("record.toml"), b"independent edit").unwrap();
+    assert!(matches!(
+        restored.adopt_snapshot(&source, &snapshot),
+        Err(Error::Integrity(_))
+    ));
+    assert_eq!(
+        fs::read(root.join("record.toml")).unwrap(),
+        b"independent edit"
+    );
+}
+
+#[test]
+fn interrupted_transfer_keeps_the_previous_checkpoint_active_and_resumes() {
+    struct Interrupted<'a> {
+        archive: &'a mut FileArchive,
+        remaining: usize,
+    }
+    impl CheckpointTarget for Interrupted<'_> {
+        fn begin(&mut self, id: &str, snapshot: &Snapshot) -> Result<()> {
+            self.archive.begin(id, snapshot)
+        }
+        fn contains_blob(&self, hash: &ContentHash) -> Result<bool> {
+            self.archive.contains_blob(hash)
+        }
+        fn stage_blob(&mut self, hash: &ContentHash, bytes: &[u8]) -> Result<()> {
+            if self.remaining == 0 {
+                return Err(Error::Io(std::io::Error::other("interrupted transport")));
+            }
+            self.remaining -= 1;
+            self.archive.stage_blob(hash, bytes)
+        }
+        fn publish(&mut self, id: &str, snapshot: &Snapshot) -> Result<ContentHash> {
+            self.archive.publish(id, snapshot)
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("workspace");
+    fs::create_dir(&root).unwrap();
+    let mut source = FileStore::open(&root, temp.path().join("control"), "source").unwrap();
+    let mut backup = FileArchive::open(temp.path().join("backup")).unwrap();
+    let first = source.checkpoint().unwrap();
+    let first_id = transfer(&source, &first, &mut backup, "first").unwrap();
+    fixture(&root);
+    let next = source.checkpoint().unwrap();
+    let mut interrupted = Interrupted {
+        archive: &mut backup,
+        remaining: 2,
+    };
+    assert!(transfer(&source, &next, &mut interrupted, "next").is_err());
+    assert_eq!(backup.checkpoints().unwrap(), vec![first_id]);
+    // Continue the retained checkpoint even if the live source has changed.
+    fs::write(root.join("interview/profile.md"), b"later edit").unwrap();
+    let next_id = transfer(&source, &next, &mut backup, "next").unwrap();
+    assert_eq!(backup.checkpoints().unwrap().len(), 2);
+    assert_eq!(backup.snapshot(&next_id).unwrap(), next);
+}
+
+#[test]
+fn comparison_distinguishes_independent_identical_and_conflicting_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("workspace");
+    fs::create_dir(&root).unwrap();
+    for name in ["local", "remote", "same", "conflict", "deleted"] {
+        fs::write(root.join(name), b"base").unwrap();
+    }
+    let mut source = FileStore::open(&root, temp.path().join("control"), "source").unwrap();
+    let base = source.checkpoint().unwrap();
+    let mut local = base.clone();
+    let mut remote = base.clone();
+    for name in ["local", "same", "conflict"] {
+        local
+            .records
+            .get_mut(&Key::new(name).unwrap())
+            .unwrap()
+            .content = ContentHash::of(b"L");
+    }
+    for name in ["remote", "conflict"] {
+        remote
+            .records
+            .get_mut(&Key::new(name).unwrap())
+            .unwrap()
+            .content = ContentHash::of(b"R");
+    }
+    remote
+        .records
+        .get_mut(&Key::new("same").unwrap())
+        .unwrap()
+        .content = ContentHash::of(b"L");
+    local.records.remove(&Key::new("deleted").unwrap());
+    let result = compare(&base, &local, &remote).unwrap();
+    for (name, expected) in [
+        ("local", Difference::LocalOnly),
+        ("remote", Difference::RemoteOnly),
+        ("same", Difference::IdenticalChange),
+        ("conflict", Difference::Conflict),
+        ("deleted", Difference::LocalOnly),
+    ] {
+        assert_eq!(result[&Key::new(name).unwrap()], expected);
+    }
+}
+
+#[test]
 fn ccvl_authored_tree_roundtrips_with_comments_references_binary_data_and_empty_directories() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("workspace");

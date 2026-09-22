@@ -41,7 +41,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: corbet-libs/ccid
-          ref: 85e316579ea938c42a4e45d42cb3ac94aa2d9328
+          ref: 33600b394910c643c5a6af6dff479fb16418428a
           path: .ci/tool
           persist-credentials: false
       - name: Select stable Rust
@@ -55,7 +55,7 @@ jobs:
       - name: Build the pinned shared runner
         run: |
           rustup run stable cargo build --locked --release --manifest-path .ci/tool/Cargo.toml
-          test "$(.ci/tool/target/release/ccid source-revision)" = 85e316579ea938c42a4e45d42cb3ac94aa2d9328
+          test "$(.ci/tool/target/release/ccid source-revision)" = 33600b394910c643c5a6af6dff479fb16418428a
       - name: Run repository contracts
         run: |
           export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
