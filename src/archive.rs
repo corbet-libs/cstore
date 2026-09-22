@@ -81,10 +81,10 @@ impl FileArchive {
             return Err(Error::Invalid("invalid request ID".into()));
         }
         let identity = snapshot.identity()?;
-        if let Some(previous) = self.catalog()?.requests.get(request_id) {
-            if previous != &identity {
-                return Err(Error::RequestConflict(request_id.into()));
-            }
+        if let Some(previous) = self.catalog()?.requests.get(request_id)
+            && previous != &identity
+        {
+            return Err(Error::RequestConflict(request_id.into()));
         }
         let path = self.staged_path(request_id);
         if path.exists() {

@@ -267,10 +267,11 @@ impl FileStore {
         metadata
             .extensions
             .insert("cstore.unix_mode".into(), mode.into());
-        if let Some(previous) = state.records.get(key) {
-            if previous.content == content && previous.metadata == metadata {
-                return Ok(Some(previous.clone()));
-            }
+        if let Some(previous) = state.records.get(key)
+            && previous.content == content
+            && previous.metadata == metadata
+        {
+            return Ok(Some(previous.clone()));
         }
         state.observations = state
             .observations

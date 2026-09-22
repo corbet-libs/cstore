@@ -24,10 +24,55 @@ layout used to ground the implementation. Database and connected CareerVector
 adapters are not yet implemented. Automatic merging of independent offline edits,
 backup scheduling and physical retention cleanup are separate product policies.
 
+## Capture and restore
+
+The caller selects the workspace scope and supplies stable store/request IDs.
+Keep the control directory and archive outside the payload tree. A checkpoint
+captures every file under the selected root, including ignored files; consumer
+adapters must define the intended scope before invoking it.
+
+```rust,no_run
+# #[cfg(all(feature = "filesystem", target_os = "linux"))]
+# fn example() -> cstore::Result<()> {
+use cstore::{FileArchive, FileStore, Store, restore_files, transfer};
+
+let mut local = FileStore::open("workspace", "workspace-state", "local-1")?;
+let snapshot = local.checkpoint()?;
+let mut backup = FileArchive::open("workspace-backup")?;
+let checkpoint = transfer(&local, &snapshot, &mut backup, "backup-request-1")?;
+
+// Select a retained checkpoint. The restore path must not already exist.
+let retained = backup.snapshot(&checkpoint)?;
+restore_files(&backup, &retained, "./restored-workspace")?;
+let mut restored = FileStore::open(
+    "restored-workspace", "restored-state", "offline-1",
+)?;
+restored.adopt_snapshot(&backup, &retained)?;
+# Ok(())
+# }
+```
+
+`restore_files` publishes only the payload tree. `adopt_snapshot` then verifies
+that tree and retains opaque metadata, historical blobs, source receipts and
+lineage in the separate destination control store. If adoption is interrupted,
+retry it against the same retained checkpoint before enabling writes. Imported
+receipts remain provenance; destination commits get destination-local identities.
+
+Use `compare(base, local, remote)` to classify changes against an explicitly
+retained common base. It reports local, remote, identical and conflicting changes;
+the caller verifies that the supplied base is the intended common ancestor and
+decides whether to merge or switch authority.
+
+The current file adapter preserves regular file bytes, paths, directories and
+ordinary Unix file permission bits. It does not preserve ownership, timestamps,
+directory permission modes, ACLs, extended attributes, hard-link relationships or
+filesystem snapshots. Process-interruption recovery has executable fault tests;
+power-loss behavior and other operating systems require separate verification.
+Observed history cannot reconstruct edits made before cstore captured them.
+
 ## Development
 
 Use current stable Rust. Repository checks are defined in `.ci/ccid.toml` and run
 through the shared ccid runner on GitHub Actions or Crow. The dependency lock is
 resolved on the build service and retained with the source. The portable core can
 be checked with filesystem support disabled.
-
