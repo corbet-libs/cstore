@@ -11,3 +11,7 @@ toolchain = "system"
 kind = "commands"
 commands = [["cargo", "check", "--locked", "--no-default-features"]]
 
+# Initial dependency capture runs explicitly on CI; ordinary checks stay locked.
+[checks.resolve]
+kind = "commands"
+commands = [["bash", ".ci/resolve.sh"]]
