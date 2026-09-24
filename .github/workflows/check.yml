@@ -8,6 +8,13 @@ on:
         type: choice
         options: ["rust,core", "resolve,rust,core", "core", "typescript-resolve,typescript", "typescript"]
         default: "rust,core"
+  # The release workflow reuses these checks on the tagged commit.
+  workflow_call:
+    inputs:
+      checks:
+        description: Shared check selectors
+        type: string
+        required: true
 
 permissions:
   contents: read

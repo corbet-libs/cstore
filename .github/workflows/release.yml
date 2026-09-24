@@ -1,0 +1,207 @@
+name: Release
+
+# A pushed v*.*.* tag runs the repository checks, packages the crate and the
+# npm tarball, and attaches both plus SHA256SUMS to a GitHub release. No
+# registry token is stored in GitHub. crates.io publication through trusted
+# publishing (OIDC) runs only when the repository variable CRATES_TRUSTED is
+# "true"; npm publication stays manual until npm trusted publishing exists.
+# See docs/releasing.md. Registry trusted-publisher rules name this file, so
+# keep the path .github/workflows/release.yml.
+#
+# Manual runs: dispatch with --ref <tag> (and tag=<tag>) to rebuild a missing
+# release, or dispatch on main with an empty tag for a rehearsal that stops
+# after the bundle artifact.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, identical to the dispatched ref; leave empty on a branch for a rehearsal without a release
+        required: false
+        default: ""
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: stable
+
+jobs:
+  version:
+    name: Check the tag against the manifests
+    if: github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require tag == v + version of Cargo.toml, package.json and package-lock.json
+        id: check
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          for source in "package.json .version" "package-lock.json .version" 'package-lock.json .packages[""].version'; do
+            read -r file field <<< "$source"
+            found=$(jq -r "$field" "$file")
+            if [[ "$found" != "$version" ]]; then
+              echo "::error::$file $field is $found, Cargo.toml version is $version"
+              exit 1
+            fi
+          done
+          tag=""
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then tag="$GITHUB_REF_NAME"; fi
+          if [[ -n "$INPUT_TAG" && "$INPUT_TAG" != "$tag" ]]; then
+            echo "::error::Dispatch with --ref $INPUT_TAG so every job builds the tagged commit"
+            exit 1
+          fi
+          if [[ -n "$tag" ]]; then
+            [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] \
+              || { echo "::error::Not a release tag: $tag"; exit 1; }
+            if [[ "$tag" != "v$version" ]]; then
+              echo "::error::Tag $tag does not match manifest version $version"
+              exit 1
+            fi
+          else
+            echo "::notice::Rehearsal of $version on $GITHUB_REF_NAME; nothing will be released or published"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  checks:
+    name: Repository checks
+    needs: version
+    permissions:
+      contents: read
+    uses: ./.github/workflows/check.yml
+    with:
+      checks: rust,core,typescript
+
+  bundle:
+    name: Package the crate and the npm tarball
+    needs: [version, checks]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up current stable Rust
+        run: rustup toolchain install stable --profile minimal
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24"
+      - name: Package and checksum
+        run: |
+          set -euo pipefail
+          # Outside the checkout: cargo package rejects untracked files.
+          bundle="$RUNNER_TEMP/bundle"
+          mkdir "$bundle"
+          cargo package --locked
+          cp "target/package/cstore-$VERSION.crate" "$bundle/"
+          npm pack --ignore-scripts --pack-destination "$bundle"
+          tarball="corbet-labs-cstore-$VERSION.tgz"
+          packed=$(tar -xOzf "$bundle/$tarball" package/package.json | jq -r '.name + "@" + .version')
+          if [[ "$packed" != "@corbet-labs/cstore@$VERSION" ]]; then
+            echo "::error::$tarball contains $packed"
+            exit 1
+          fi
+          (cd "$bundle" && sha256sum "cstore-$VERSION.crate" "$tarball" > SHA256SUMS && cat SHA256SUMS)
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: cstore-release-${{ needs.version.outputs.version }}
+          path: ${{ runner.temp }}/bundle/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+  github-release:
+    name: Create the GitHub release
+    needs: [version, bundle]
+    if: needs.version.outputs.tag != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ needs.version.outputs.tag }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: cstore-release-${{ needs.version.outputs.version }}
+          path: bundle
+      - name: Create the release with the packages and SHA256SUMS if it is missing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Never replace assets of an existing release: the lead may already
+          # have published those exact bytes.
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists; leaving its assets unchanged"
+            exit 0
+          fi
+          prerelease=()
+          if [[ "$RELEASE_TAG" == *-* ]]; then prerelease=(--prerelease); fi
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --generate-notes --title "$RELEASE_TAG" "${prerelease[@]}" \
+            bundle/*.crate bundle/*.tgz bundle/SHA256SUMS
+
+  crates-io:
+    name: Publish to crates.io
+    # Off until the crate exists on crates.io and has a trusted-publisher rule
+    # for corbet-libs/cstore + release.yml; then set the repository variable
+    # CRATES_TRUSTED=true (docs/releasing.md).
+    needs: [version, bundle]
+    if: needs.version.outputs.tag != '' && vars.CRATES_TRUSTED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Skip a version that is already on crates.io
+        id: registry
+        run: |
+          status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --user-agent "$GITHUB_REPOSITORY release workflow ($GITHUB_SERVER_URL/$GITHUB_REPOSITORY)" \
+            "https://crates.io/api/v1/crates/cstore/$VERSION")
+          case "$status" in
+            200) echo "cstore $VERSION is already on crates.io; skipping publish"; echo "published=true" >> "$GITHUB_OUTPUT" ;;
+            404) echo "published=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::crates.io lookup returned HTTP $status"; exit 1 ;;
+          esac
+      - name: Set up current stable Rust
+        if: steps.registry.outputs.published == 'false'
+        run: rustup toolchain install stable --profile minimal
+      - name: Obtain a short-lived crates.io token
+        if: steps.registry.outputs.published == 'false'
+        id: auth
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+      - name: Publish
+        if: steps.registry.outputs.published == 'false'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --locked
