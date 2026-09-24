@@ -1,5 +1,5 @@
 {
-  "name": "@corbet-libs/cstore",
+  "name": "@corbet-labs/cstore",
   "version": "0.1.0",
   "description": "Yjs workspace persistence extracted from CareerVector",
   "license": "FSL-1.1-ALv2",

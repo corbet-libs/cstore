@@ -5,7 +5,7 @@ FSL-1.1-ALv2. Product adapters retain data meaning, authorization and authored f
 layouts. Work is in progress; supported backends and verification are recorded
 below as they are delivered.
 
-`@corbet-libs/cstore` extracts CareerVector's existing TypeScript/Yjs snapshot
+`@corbet-labs/cstore` extracts CareerVector's existing TypeScript/Yjs snapshot
 lifecycle and D1 persistence primitives. Product schemas and operation policy stay
 with the consumer. See the [extraction boundary](docs/careervector-extraction.md)
 for API/MCP integration, database request reductions and transaction guarantees.
